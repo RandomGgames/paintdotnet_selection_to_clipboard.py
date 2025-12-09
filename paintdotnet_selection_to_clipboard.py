@@ -21,7 +21,7 @@ The selection information is extracted from the StatusBar and is expected to be 
 It will copy the selection information to the clipboard in the format "X, Y, Width, Height".
 """
 
-__version__ = "1.0.0"  # Major.Minor.Patch
+__version__ = "1.0.1"  # Major.Minor.Patch
 
 
 def read_toml(file_path: typing.Union[str, pathlib.Path]) -> dict:
@@ -35,15 +35,12 @@ def read_toml(file_path: typing.Union[str, pathlib.Path]) -> dict:
     return config
 
 
-def get_selection_info(pattern, main_window) -> typing.Union[str, None]:
+def get_selection_info(pattern, main_window) -> typing.Optional[str]:
+    """Extract the four selection numbers from Paint.NET's status bar."""
     try:
-        # Locate the StatusBar
         status_bar = main_window.child_window(auto_id="statusBar", control_type="StatusBar")
-
-        # Get all Text elements inside the StatusBar
         texts = status_bar.descendants(control_type="Text")
 
-        # Find the one that contains "Selection top left"
         for t in texts:
             txt = t.window_text()
             if "Selection top left" in txt:
@@ -51,31 +48,69 @@ def get_selection_info(pattern, main_window) -> typing.Union[str, None]:
                 if match:
                     return ", ".join(match.groups())
         return None
-    except Exception as e:
-        print("Error:", e)
+
+    except Exception:
+        # If any element becomes unavailable (window closes), this returns None
         return None
 
 
-def main() -> None:
-    # Connect to Paint.NET
-    try:
-        app = Application(backend="uia").connect(title_re=".*Paint.NET.*")
-        main_window = app.window(title_re=".*Paint.NET.*")
-    except Exception as e:
-        logger.error("Could not find Paint.NET window.", exc_info=True)
-        return
+def wait_for_paintdotnet():
+    """Wait until a Paint.NET window exists and return (app, window)."""
+    logger.info("Waiting for Paint.NET connection...")
 
-    # Regex to extract four numbers
+    while True:
+        try:
+            app = Application(backend="uia").connect(title_re=r".*Paint\.NET.*")
+            window = app.window(title_re=r".*Paint\.NET.*")
+
+            if window.exists(timeout=0.5):
+                pid = window.process_id()
+                logger.info(f"Connected to Paint.NET application (PID: {pid})")
+                return app, window
+
+        except Exception:
+            pass
+
+        time.sleep(0.5)  # keep waiting
+
+
+def monitor_selection(window):
+    """Monitor the paint window until it's closed or unavailable."""
     pattern = re.compile(r"(\d+)[^\d]+(\d+)[^\d]+(\d+)[^\d]+(\d+)")
+    last_value = ""
 
     logger.info("Monitoring Paint.NET selection info...")
-    last_value = ""
+
     while True:
-        value = get_selection_info(pattern, main_window)
-        if value and value != last_value:
-            pyperclip.copy(value)
-            logger.info(f"Copied to clipboard: {value}")
-            last_value = value
+        try:
+            if not window.exists():
+                # Window vanished → disconnect
+                return
+
+            value = get_selection_info(pattern, window)
+
+            if value and value != last_value:
+                pyperclip.copy(value)
+                logger.info(f"Copied to clipboard: {value}")
+                last_value = value
+
+            time.sleep(0.1)
+
+        except Exception:
+            # Any failure means the window is gone
+            return
+
+
+def main():
+    while True:
+        # Wait until Paint.NET appears
+        _, window = wait_for_paintdotnet()
+
+        # Monitor while connected
+        monitor_selection(window)
+
+        # When monitor exits → window is gone
+        logger.info("Lost connection to Paint.NET window.")
         time.sleep(0.5)
 
 
