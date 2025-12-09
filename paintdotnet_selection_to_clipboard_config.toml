@@ -1,0 +1,8 @@
+example_key = "example_value"
+
+[logging]
+console_logging_level = "DEBUG"                                                          # DEBUG, INFO, WARNING, ERROR
+file_logging_level = "DEBUG"                                                             # DEBUG, INFO, WARNING, ERROR
+log_message_format = "%(asctime)s.%(msecs)03d %(levelname)s [%(funcName)s]: %(message)s"
+logs_folder_name = "logs"
+max_folder_size = 52428800                                                               # (Bytes) 50 MB
