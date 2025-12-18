@@ -14,6 +14,7 @@ import win32gui
 import win32process
 from datetime import datetime
 from pywinauto import Application
+from pywinauto.timings import TimeoutError, wait_until_passes
 
 logger = logging.getLogger(__name__)
 
@@ -80,21 +81,43 @@ def get_active_window():
 
 def get_selection_info(pattern, main_window) -> typing.Optional[str]:
     """Extract the four selection numbers from Paint.NET's status bar."""
-    try:
-        status_bar = main_window.child_window(auto_id="statusBar", control_type="StatusBar")
-        texts = status_bar.descendants(control_type="Text")
 
-        for t in texts:
-            txt = t.window_text()
-            if "Selection top left" in txt:
-                match = pattern.search(txt)
-                if match:
-                    return ", ".join(match.groups())
+    try:
+        # Wait up to 2 seconds for the status bar to exist
+        try:
+            status_bar = wait_until_passes(
+                timeout=2,
+                retry_interval=0.2,
+                func=lambda: main_window.child_window(
+                    auto_id="statusBar",
+                    control_type="StatusBar"
+                ).wrapper_object()
+            )
+        except TimeoutError:
+            # Status bar not ready; return None
+            return None
+
+        # Iterate lazily; stop as soon as we find the relevant text
+        for text_ctrl in status_bar.descendants(control_type="Text"):
+            txt = text_ctrl.window_text()
+            if "Selection top left" not in txt:
+                continue
+
+            match = pattern.search(txt)
+            if match:
+                return ", ".join(match.groups())
+
+        # Not found is a valid outcome
+        return None
+
+    except (RuntimeError, LookupError) as e:
+        # Common UIA failures: window closed, element detached, etc.
+        logger.debug("UI element unavailable while reading selection info", exc_info=True)
         return None
 
     except Exception:
-        # If any element becomes unavailable (window closes), this returns None
-        logger.error("Failed to get selection info", exc_info=True)
+        # Truly unexpected errors
+        logger.exception("Unexpected failure in get_selection_info")
         return None
 
 
