@@ -303,3 +303,4 @@ if __name__ == "__main__":
             handler.close()
         logger.handlers.clear()
         input("Press Enter to exit...")
+        sys.exit(error)
