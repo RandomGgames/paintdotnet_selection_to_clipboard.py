@@ -1,5 +1,7 @@
+import json
 import logging
 import pathlib
+import psutil
 import pyperclip
 import re
 import socket
@@ -8,20 +10,15 @@ import time
 import toml
 import traceback
 import typing
+import win32gui
+import win32process
 from datetime import datetime
 from pywinauto import Application
 
 logger = logging.getLogger(__name__)
 
-"""
-Paint.NET Selection to Clipboard
 
-This script monitors the selection information in Paint.NET and copies it to the clipboard.
-The selection information is extracted from the StatusBar and is expected to be in the format "Selection top left: X, Y, Width, Height".
-It will copy the selection information to the clipboard in the format "X, Y, Width, Height".
-"""
-
-__version__ = "1.0.1"  # Major.Minor.Patch
+__version__ = "1.2.0"  # Major.Minor.Patch
 
 
 def read_toml(file_path: typing.Union[str, pathlib.Path]) -> dict:
@@ -33,6 +30,52 @@ def read_toml(file_path: typing.Union[str, pathlib.Path]) -> dict:
         raise FileNotFoundError(f'File not found: "{file_path}"')
     config = toml.load(file_path)
     return config
+
+
+def get_active_window():
+    """
+    Returns a dict with:
+        exe_name
+        hwnd
+        pid
+        title
+        window (pywinauto WindowSpecification)
+    or None if unavailable
+    """
+    hwnd = win32gui.GetForegroundWindow()
+    if not hwnd:
+        return None
+
+    title = win32gui.GetWindowText(hwnd)
+    if not title:
+        return None
+
+    try:
+        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+    except Exception:
+        return None
+
+    try:
+        process = psutil.Process(pid)
+        exe_name = process.name()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return None
+
+    try:
+        app = Application(backend="uia").connect(process=pid)
+        window = app.window(handle=hwnd)
+        if not window.exists(timeout=0.2):
+            return None
+    except Exception:
+        return None
+
+    return {
+        "exe_name": exe_name,
+        "hwnd": hwnd,
+        "pid": pid,
+        "title": title,
+        "window": window,
+    }
 
 
 def get_selection_info(pattern, main_window) -> typing.Optional[str]:
@@ -51,67 +94,65 @@ def get_selection_info(pattern, main_window) -> typing.Optional[str]:
 
     except Exception:
         # If any element becomes unavailable (window closes), this returns None
+        logger.error("Failed to get selection info", exc_info=True)
         return None
 
 
-def wait_for_paintdotnet():
-    """Wait until a Paint.NET window exists and return (app, window)."""
-    logger.info("Waiting for Paint.NET connection...")
-
-    while True:
-        try:
-            app = Application(backend="uia").connect(title_re=r".*Paint\.NET.*")
-            window = app.window(title_re=r".*Paint\.NET.*")
-
-            if window.exists(timeout=0.5):
-                pid = window.process_id()
-                logger.info(f"Connected to Paint.NET application (PID: {pid})")
-                return app, window
-
-        except Exception:
-            pass
-
-        time.sleep(0.5)  # keep waiting
+def get_current_clipboard_text():
+    return pyperclip.paste()
 
 
-def monitor_selection(window):
-    """Monitor the paint window until it's closed or unavailable."""
-    pattern = re.compile(r"(\d+)[^\d]+(\d+)[^\d]+(\d+)[^\d]+(\d+)")
-    last_value = ""
-
-    logger.info("Monitoring Paint.NET selection info...")
-
-    while True:
-        try:
-            if not window.exists():
-                # Window vanished → disconnect
-                return
-
-            value = get_selection_info(pattern, window)
-
-            if value and value != last_value:
-                pyperclip.copy(value)
-                logger.info(f"Copied to clipboard: {value}")
-                last_value = value
-
-            time.sleep(0.1)
-
-        except Exception:
-            # Any failure means the window is gone
-            return
+def get_coordinates_as_json(coordiantes: str):
+    x, y, w, h = coordiantes.split(",")
+    data = {"children": {"Height": {"value": int(h)}, "Width": {"value": int(w)}, "X": {"value": int(x)}, "Y": {"value": int(y)}}}
+    return json.dumps(data)
 
 
 def main():
+    paintdotnet_selection_regex_pattern = config.get("paintdotnet_selection_regex_pattern", r"(\d+)[^\d]+(\d+)[^\d]+(\d+)[^\d]+(\d+)")
+    pattern = re.compile(paintdotnet_selection_regex_pattern)
+
+    last_coordinates_txt = None
+    last_coordinates_json = None
     while True:
-        # Wait until Paint.NET appears
-        _, window = wait_for_paintdotnet()
-
-        # Monitor while connected
-        monitor_selection(window)
-
-        # When monitor exits → window is gone
-        logger.info("Lost connection to Paint.NET window.")
-        time.sleep(0.5)
+        # logger.debug(f'{last_coordinates_txt=}')
+        active_window = get_active_window()
+        match active_window:
+            case None:
+                time.sleep(0.5)
+                continue
+            case {"exe_name": exe}:
+                # logger.debug(f"{exe=}")
+                match exe:
+                    case "paintdotnet.exe":
+                        selection_data = get_selection_info(pattern, active_window["window"])
+                        if selection_data:
+                            current_clipboard = get_current_clipboard_text()
+                            if last_coordinates_txt != selection_data:
+                                pyperclip.copy(selection_data)
+                                logger.info(f"Copied to clipboard: {selection_data}")
+                                last_coordinates_txt = selection_data
+                                last_coordinates_json = get_coordinates_as_json(selection_data)
+                        time.sleep(0.1)
+                        continue
+                    case "PRS.exe":
+                        if last_coordinates_json:
+                            current_clipboard = get_current_clipboard_text()
+                            if current_clipboard != last_coordinates_json:
+                                if current_clipboard == last_coordinates_txt:
+                                    pyperclip.copy(last_coordinates_json)
+                                    logger.info(f"Copied to clipboard: {last_coordinates_json}")
+                        time.sleep(0.5)
+                        continue
+                    case _:
+                        if last_coordinates_txt:
+                            current_clipboard = get_current_clipboard_text()
+                            if current_clipboard != last_coordinates_txt:
+                                if current_clipboard == last_coordinates_json:
+                                    pyperclip.copy(last_coordinates_txt)
+                                    logger.info(f"Copied to clipboard: {last_coordinates_txt}")
+                        time.sleep(0.5)
+                        continue
 
 
 def format_duration_long(duration_seconds: float) -> str:
@@ -262,4 +303,3 @@ if __name__ == "__main__":
             handler.close()
         logger.handlers.clear()
         input("Press Enter to exit...")
-        sys.exit(error)
