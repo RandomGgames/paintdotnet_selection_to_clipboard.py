@@ -1,4 +1,4 @@
-example_key = "example_value"
+paintdotnet_selection_regex_pattern = "(\\d+)[^\\d]+(\\d+)[^\\d]+(\\d+)[^\\d]+(\\d+)"
 
 [logging]
 console_logging_level = "DEBUG"                                                          # DEBUG, INFO, WARNING, ERROR
